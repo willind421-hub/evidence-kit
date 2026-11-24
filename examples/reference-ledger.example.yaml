@@ -1,0 +1,22 @@
+# Reference ledger example (synthetic). Schema guide for evidence_kit.reference_ledger.
+# A row needs a whitelisted `type` and a non-empty `label`; a missing/unknown
+# `status` is demoted to `proposed`.
+# Types: project | artifact | channel | account_subscription | device | data_source | goal
+# Hybrid registration: facts may update automatically / meaning = propose + approve
+# (proposed -> confirmed) / removal = propose only.
+contract: evidence_kit.reference_ledger
+version: 0.1.0
+updated: 2026-01-15
+registration: hybrid
+
+instances:
+  example-project:
+    type: project
+    label: "Example project — projects/example"
+    source_ledger: assets          # the canonical record lives in another ledger
+    refs: {publishes_to: [example-blog], serves: [goal-launch]}
+    status: confirmed
+  example-blog: {type: channel, label: "Example publishing channel", status: proposed}
+  example-dataset: {type: data_source, label: "Example public dataset", refs: {feeds: [example-project]}}
+  goal-launch: {type: goal, label: "Ship the example v1", due: "2026-02-01", status: confirmed}
+  goal-docs: {type: goal, label: "Write the user guide", status: proposed}
