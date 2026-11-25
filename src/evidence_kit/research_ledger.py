@@ -181,7 +181,7 @@ class ResearchLedger:
         required = [sq for sq in self.subquestions if sq.importance == IMPORTANCE_REQUIRED]
         req_done = all(sq.status != "open" for sq in required) if required else False
         if req_done and not self.open_gaps():
-            return True, "required_covered"
+            return True, "required_covered" if self.completion() == COMPLETE else "required_settled"
         if len(round_stats) >= stale_rounds and all(
                 (r.get("new_evidence") or 0) == 0 for r in round_stats[-stale_rounds:]):
             return True, "stale_rounds"
@@ -196,16 +196,17 @@ class ResearchLedger:
     def completion(self) -> str:
         """One of the three completion states — deliver honestly even with unknowns (no endless loop)."""
         required = [sq for sq in self.subquestions if sq.importance == IMPORTANCE_REQUIRED]
-        has_any_confirmed = any(c.status == "confirmed" for c in self.claims)
-        has_any_evidence = has_any_confirmed or any(c.spans for c in self.claims)
-        if required and all(sq.status != "covered" for sq in required) and not has_any_evidence:
-            return INSUFFICIENT
-        if not self.subquestions and not has_any_evidence:
+        has_any_evidence = any(s.url for c in self.claims for s in c.spans)
+        if not has_any_evidence:
             return INSUFFICIENT
         unknowns = (self.open_gaps()
                     or [g for g in self.gaps if g.status == "blocked"]
                     or [c for c in self.conflicts if c.status == "unresolved"]
-                    or [sq for sq in self.subquestions if sq.status != "covered"])
+                    or [sq for sq in self.subquestions if sq.status != "covered"]
+                    or [c for c in self.claims if c.status != "confirmed"
+                        or not any(s.stance == "supports" and s.url for s in c.spans)]
+                    or [sq for sq in required
+                        if not any(c.subq_id == sq.id for c in self.claims)])
         return COMPLETE_WITH_UNKNOWNS if unknowns else COMPLETE
 
     # ---- serialization (for job files — no black boxes) ----

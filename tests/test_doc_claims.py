@@ -2,8 +2,8 @@
 
 Tags are matched only in the single-line HTML comment form (prose containing
 "claim:" is not parsed), targets are confined to the root directory, results are
-boolean descriptions only (no file contents), and parse failures are *skipped*,
-not reported as drift (silence over false alarms).
+boolean descriptions only (not a confidentiality guarantee), and parse failures
+are *skipped*, not reported as drift, but make verification fail.
 """
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def test_broken_tag_is_skipped_not_drift(tmp_path):
     doc = tmp_path / "d.md"
     doc.write_text("## X\n<!-- claim: {broken json} -->\n", encoding="utf-8")
     report = vdc.run(doc, root=tmp_path)
-    assert report["ok"] is True and report["checked"] == 0
+    assert report["ok"] is False and report["checked"] == 0
     assert len(report["skipped"]) == 1
 
 
@@ -61,7 +61,7 @@ def test_grep_drift_reports_boolean_only(tmp_path):
         '## Y\n<!-- claim: {"type": "grep", "target": "pkg/ledger.py",'
         ' "pattern": "def no_such_function", "expect": "present"} -->\n',
         encoding="utf-8")
-    report = vdc.run(doc, root=root)
+    report = vdc.run(doc, root=root, grep_allowlist=["pkg/ledger.py"])
     assert report["ok"] is False and len(report["drifts"]) == 1
     d = report["drifts"][0]
     assert d["actual"] == "pattern absent"     # no source text or context leaked
@@ -79,7 +79,7 @@ def test_ok_claims_against_root(tmp_path):
         '<!-- claim: {"type": "grep", "target": "pkg/ledger.py", "pattern": "def load_assets"} -->',
         '<!-- claim: {"type": "grep", "target": "pkg/ledger.py", "pattern": "TODO", "expect": "absent"} -->',
     ]), encoding="utf-8")
-    report = vdc.run(doc, root=root)
+    report = vdc.run(doc, root=root, grep_allowlist=["pkg/ledger.py"])
     assert report == {"ok": True, "checked": 3, "drifts": [], "skipped": []}
 
 
@@ -90,9 +90,9 @@ def test_no_claims_and_parse_failure_are_distinct(tmp_path):
     broken.write_text("## B\n<!-- claim: [1, 2] -->\n<!-- claim: {not json} -->\n", encoding="utf-8")
     r_empty = vdc.run(empty, root=tmp_path)
     r_broken = vdc.run(broken, root=tmp_path)
-    assert r_empty == {"ok": True, "checked": 0, "drifts": [], "skipped": []}
+    assert r_empty == {"ok": False, "checked": 0, "drifts": [], "skipped": []}
     assert r_broken["checked"] == 0 and r_broken["drifts"] == []
-    assert [s["actual"] for s in r_broken["skipped"]] == ["tag parse failed or unsupported type"]
+    assert [s["actual"] for s in r_broken["skipped"]] == ["tag parse failed or unsupported type"] * 2
 
 
 def test_unreadable_document_is_not_ok(tmp_path):
@@ -124,7 +124,7 @@ def test_cli_output_survives_non_utf8_stdout(tmp_path, monkeypatch):
     buf = io.BytesIO()
     out = io.TextIOWrapper(buf, encoding="ascii")
     monkeypatch.setattr("sys.stdout", out)
-    assert vdc.main(["--root", str(tmp_path), str(doc)]) == 0
+    assert vdc.main(["--root", str(tmp_path), str(doc)]) == 1
     out.flush()
     report = json.loads(buf.getvalue().decode("ascii"))
     assert report["skipped"][0]["section"] == "Caf\u00e9 \u2014 notes"

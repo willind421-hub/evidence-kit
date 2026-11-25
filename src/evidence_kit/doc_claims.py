@@ -15,16 +15,18 @@ Contract:
 - Only two types: ``file_exists`` / ``grep`` (``expect``: ``present`` | ``absent``,
   default ``present``). Running tests or commands is deliberately not part of
   the convention — no dead fields, no side effects.
-- Read-only: only a boolean match result is reported; matched text is never
-  included in the report (even a tag aimed at a secret cannot leak its value).
+- Read-only: matched text is not included in reports. Boolean results can still
+  disclose content when a caller controls patterns (a boolean oracle). Grep is
+  disabled unless trusted caller configuration allowlists exact target files.
 - ``target`` is confined to the root directory; a target outside the root is
   refused.
-- Parse failures and missing fields are quietly *skipped* (silence over false
-  alarms) — they go to ``skipped``, never to ``drifts``.
+- Parse failures, unterminated tags and missing fields go to ``skipped``, not
+  ``drifts``, but fail the report. A document with zero checks also fails.
 - No auto-fix: nothing in the documents or code is modified. Report only.
 
 Output follows a verify-style contract: JSON ``{ok, checked, drifts, skipped}``
-and exit code 0 (no drift) / 1 (drift or unreadable document).
+and exit code 0 (checks passed) / 1 (drift, skipped, no checks, unreadable document).
+This checks tagged file/substring assertions, not program behavior or security.
 """
 from __future__ import annotations
 
@@ -35,7 +37,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-_TAG_RE = re.compile(r"<!--\s*claim:\s*(\{.*?\})\s*-->")
+_TAG_START_RE = re.compile(r"<!--\s*claim:\s*")
 _HEADING_RE = re.compile(r"^(#{2,3})\s+(.*)")
 _VALID_TYPES = ("file_exists", "grep")
 
@@ -56,20 +58,20 @@ def parse_claims(text: str):
         h = _HEADING_RE.match(line.strip())
         if h:
             heading = h.group(2).strip()[:60]
-        m = _TAG_RE.search(line)
-        if not m:
-            continue
-        try:
-            obj = json.loads(m.group(1))
-        except (ValueError, TypeError):
-            claims.append({"line": lineno, "section": heading, "error": "parse"})
-            continue
-        if not isinstance(obj, dict):
-            claims.append({"line": lineno, "section": heading, "error": "parse"})
-            continue
-        obj["line"] = lineno
-        obj["section"] = heading
-        claims.append(obj)
+        starts = list(_TAG_START_RE.finditer(line))
+        for idx, match in enumerate(starts):
+            end = starts[idx + 1].start() if idx + 1 < len(starts) else len(line)
+            payload, closed, _ = line[match.end():end].partition("-->")
+            try:
+                obj = json.loads(payload) if closed else None
+            except (ValueError, TypeError):
+                obj = None
+            if not isinstance(obj, dict):
+                claims.append({"line": lineno, "section": heading, "error": "parse"})
+                continue
+            obj["line"] = lineno
+            obj["section"] = heading
+            claims.append(obj)
     return claims
 
 
@@ -86,10 +88,11 @@ def _safe_target(target, root=None) -> Path | None:
     return p
 
 
-def check_claim(claim: dict, root=None):
+def check_claim(claim: dict, root=None, *, grep_allowlist=()):
     """Check one claim -> ``(status, actual)``; status is ``ok`` | ``drift`` | ``skipped``.
 
-    ``actual`` is a boolean-style description only — file contents are never included.
+    ``actual`` is a boolean-style description, not matched file text; this is not
+    a confidentiality guarantee. Grep targets require a trusted allowlist.
     ``root`` defaults to the current working directory.
     """
     ctype = claim.get("type")
@@ -99,7 +102,7 @@ def check_claim(claim: dict, root=None):
     if p is None:
         return "skipped", "target missing or outside root"
     if ctype == "file_exists":
-        return ("ok", "exists") if p.exists() else ("drift", "file missing")
+        return ("ok", "exists") if p.is_file() else ("drift", "file missing")
     # grep
     pattern = claim.get("pattern")
     if not isinstance(pattern, str) or not pattern:
@@ -107,6 +110,11 @@ def check_claim(claim: dict, root=None):
     expect = claim.get("expect", "present")
     if expect not in ("present", "absent"):
         return "skipped", "unsupported expect value"
+    # Policy comes from the trusted caller, never from document tags.
+    # Boolean matches disclose content too; root confinement alone is insufficient.
+    allowed = {_safe_target(target, root) for target in grep_allowlist}
+    if p not in allowed:
+        return "skipped", "grep target not allowlisted"
     try:
         found = pattern in p.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -116,7 +124,7 @@ def check_claim(claim: dict, root=None):
     return "drift", ("pattern absent" if expect == "present" else "pattern present (expected absent)")
 
 
-def run(doc_path, root=None) -> dict:
+def run(doc_path, root=None, *, grep_allowlist=()) -> dict:
     """Check every claim in one Markdown document.
 
     Returns ``{"ok", "checked", "drifts", "skipped"}`` (plus ``"error"`` when the
@@ -127,12 +135,13 @@ def run(doc_path, root=None) -> dict:
     doc = Path(doc_path)
     try:
         text = doc.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
         return {"ok": False, "checked": 0, "drifts": [], "skipped": [],
                 "error": f"failed to read document: {doc}"}
     checked, drifts, skipped = 0, [], []
+    grep_allowlist = tuple(grep_allowlist)
     for claim in parse_claims(text):
-        status, actual = check_claim(claim, root)
+        status, actual = check_claim(claim, root, grep_allowlist=grep_allowlist)
         row = {"section": claim.get("section", ""), "line": claim.get("line"),
                "type": claim.get("type"), "target": claim.get("target"),
                "actual": actual}
@@ -143,25 +152,27 @@ def run(doc_path, root=None) -> dict:
             drifts.append(row)
         else:
             skipped.append(row)
-    return {"ok": not drifts, "checked": checked, "drifts": drifts,
+    return {"ok": checked > 0 and not drifts and not skipped, "checked": checked, "drifts": drifts,
             "skipped": skipped}
 
 
-def run_many(doc_paths: Iterable, root=None) -> dict:
+def run_many(doc_paths: Iterable, root=None, *, grep_allowlist=()) -> dict:
     """Run :func:`run` over several documents and merge the reports.
 
     Same keys as :func:`run`; every drift/skipped row gains a ``"doc"`` field, and
     unreadable documents are listed under ``"errors"`` (which makes ``ok`` False).
     """
-    checked, drifts, skipped, errors = 0, [], [], []
+    checked, drifts, skipped, errors, all_ok = 0, [], [], [], True
+    grep_allowlist = tuple(grep_allowlist)
     for doc in doc_paths:
-        report = run(doc, root)
+        report = run(doc, root, grep_allowlist=grep_allowlist)
+        all_ok = all_ok and report["ok"]
         if "error" in report:
             errors.append(report["error"])
         checked += report["checked"]
         drifts.extend({"doc": str(doc), **row} for row in report["drifts"])
         skipped.extend({"doc": str(doc), **row} for row in report["skipped"])
-    out = {"ok": not drifts and not errors, "checked": checked,
+    out = {"ok": all_ok and checked > 0, "checked": checked,
            "drifts": drifts, "skipped": skipped}
     if errors:
         out["errors"] = errors
@@ -177,11 +188,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--root", default=".",
                         help="directory that claim targets are resolved against "
                              "(targets outside it are refused; default: current directory)")
+    parser.add_argument("--allow-grep", action="append", default=[], metavar="TARGET",
+                        help="allow content checks of this exact root-relative file (repeatable; "
+                             "default: none). Set only from trusted configuration, not documents; "
+                             "boolean results can disclose allowed file contents")
     args = parser.parse_args(argv)
     if len(args.files) == 1:
-        report = run(args.files[0], args.root)
+        report = run(args.files[0], args.root, grep_allowlist=args.allow_grep)
     else:
-        report = run_many(args.files, args.root)
+        report = run_many(args.files, args.root, grep_allowlist=args.allow_grep)
     try:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     except UnicodeEncodeError:   # e.g. a legacy Windows code page on a pipe

@@ -18,7 +18,7 @@ def test_dedup_exact_and_semantic():
         {"title": "Partner program sign up guide", "url": "http://a.com/2"},  # same domain + similar title
         {"title": "A completely different topic", "url": "http://b.com/1"},
     ]
-    out = dedup_evidence(items, threshold=0.5)
+    out = dedup_evidence(items, threshold=0.5, merge_similar=True)
     assert out["before"] == 4
     urls = [e["url"] for e in out["kept"]]
     assert "http://a.com/1" in urls and "http://b.com/1" in urls
@@ -38,13 +38,14 @@ def test_same_url_twice_keeps_first_occurrence():
     items = [{"url": "https://example.com/a", "title": "First", "snippet": "one"},
              {"url": "https://example.com/a", "title": "Second", "snippet": "two"}]
     out = dedup_evidence(items)
-    assert out == {"kept": [items[0]], "before": 2, "after": 1}
+    assert out == {"kept": [items[0]], "before": 2, "after": 1,
+                   "merged": [{"kept_index": 0, "dropped_index": 1, "reason": "exact_url"}]}
 
 
 def test_identical_title_same_domain_merges_at_default_threshold():
     items = [{"url": "https://www.example.com/a", "title": "Pricing plans"},
              {"url": "https://example.com/b", "title": "pricing PLANS"}]   # www. and case ignored
-    assert dedup_evidence(items)["after"] == 1
+    assert dedup_evidence(items, merge_similar=True)["after"] == 1
 
 
 def test_similar_title_below_default_threshold_is_kept():
@@ -60,15 +61,15 @@ def test_other_fields_such_as_ids_are_not_compared():
              {"id": "e2", "url": "https://example.com/a", "title": "Report"},
              {"id": "e3", "url": "https://example.com/b", "title": "Report"}]
     out = dedup_evidence(items)
-    assert [e["id"] for e in out["kept"]] == ["e1"]
+    assert [e["id"] for e in out["kept"]] == ["e1", "e3"]
 
 
-def test_missing_url_falls_back_to_title_as_exact_key():
-    # Without a url the title becomes the exact-match key, whatever the source.
+def test_missing_url_keeps_distinct_sources():
+    # A shared title is not evidence of source identity.
     items = [{"title": "Shared headline", "source": "feed-a"},
              {"title": "Shared headline", "source": "feed-b"}]
     out = dedup_evidence(items)
-    assert [e["source"] for e in out["kept"]] == ["feed-a"]
+    assert [e["source"] for e in out["kept"]] == ["feed-a", "feed-b"]
 
 
 def test_empty_titles_are_kept_and_non_dicts_ignored():
@@ -83,5 +84,5 @@ def test_order_is_preserved():
     items = [{"url": f"https://site{i}.example/", "title": f"Item {i}"} for i in range(5)]
     out = dedup_evidence(items)
     assert out["kept"] == items
-    assert dedup_evidence([]) == {"kept": [], "before": 0, "after": 0}
-    assert dedup_evidence(None) == {"kept": [], "before": 0, "after": 0}
+    assert dedup_evidence([]) == {"kept": [], "before": 0, "after": 0, "merged": []}
+    assert dedup_evidence(None) == {"kept": [], "before": 0, "after": 0, "merged": []}

@@ -54,15 +54,23 @@ def dedup_demo() -> None:
         {"url": "https://example.org/review", "title": "Pricing plans"},        # other domain: kept
     ]
     out = dedup_evidence(items)
+    assert (out['before'], out['after']) == (4, 3)
     print(f"before={out['before']} after={out['after']}")
+    print("  merged", json.dumps(out['merged']))
     for item in out["kept"]:
         print("  kept", item["url"])
 
 
 def doc_claims_demo() -> None:
     print("== doc_claims")
-    report = check_doc(HERE / "sample-doc.md", root=REPO)
+    report = check_doc(HERE / "sample-doc.md", root=REPO,
+                       grep_allowlist=['src/evidence_kit/doc_claims.py',
+                                       'src/evidence_kit/evidence_dedup.py'])
+    assert report == {'ok': True, 'checked': 3, 'drifts': [], 'skipped': []}
     print(json.dumps(report, indent=2))
+    broken = check_doc(HERE / 'invalid-doc.md', root=REPO)
+    assert broken['ok'] is False and len(broken['skipped']) == 1
+    print('invalid document (expected failure):', json.dumps(broken))
 
 
 def reference_ledger_demo() -> None:

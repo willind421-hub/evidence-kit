@@ -1,12 +1,10 @@
 """evidence_dedup — lightweight de-duplication of search evidence.
 
-Pass 1 removes exact duplicates (key = ``url``, or ``title`` when ``url`` is
-missing). Pass 2 merges items on the *same domain* whose title-token Jaccard
-similarity is at or above ``threshold``. No embeddings, no network.
-
-Guards against over-merging: items on different domains are never merged by
-title, and items with an empty title (or no domain) are never merged by pass 2.
-Other fields (ids, source names, snippets) are not compared.
+By default only non-empty string URLs that match exactly are de-duplicated.
+Missing URLs and distinct paths (including different document versions) are kept.
+Optional ``merge_similar=True`` enables lossy same-domain title-token matching;
+it can discard distinct sources, so every removal has an audit entry.
+No embeddings, no network. Other metadata is not merged field by field.
 """
 from __future__ import annotations
 
@@ -33,37 +31,36 @@ def _jaccard(a: set, b: set) -> float:
     return len(a & b) / len(a | b) if (a | b) else 0.0
 
 
-def dedup_evidence(items: List[dict], *, threshold: float = 0.85) -> dict:
+def dedup_evidence(items: List[dict] | None, *, threshold: float = 0.85,
+                   merge_similar: bool = False) -> dict:
     """De-duplicate evidence items (dicts with ``url`` and/or ``title``).
 
-    Pass 1: exact match on ``url`` (falls back to ``title`` when ``url`` is empty).
-    Pass 2: same domain + title-token Jaccard >= ``threshold``.
-
-    Never merges across domains; items with an empty title are kept by pass 2.
-    Non-dict entries are ignored. Order is preserved (the first occurrence wins).
-
-    Returns ``{"kept": [...], "before": int, "after": int}`` — before/after counts
-    are returned together so the reduction can be audited (no black box).
+    Exact URL matching is the default. URL-less items are always kept.
+    ``merge_similar=True`` additionally drops same-domain items with title-token
+    Jaccard >= ``threshold``; this is lossy even for versioned documents.
+    Non-dict entries are ignored; order is preserved (first occurrence wins).
+    ``merged`` entries contain zero-based original-input ``kept_index`` and
+    ``dropped_index`` plus ``reason`` (``exact_url`` or ``similar_title``).
+    Counts include dict entries only. Input objects are not modified.
     """
-    valid = [it for it in (items or []) if isinstance(it, dict)]
-    seen, exact = set(), []
-    for it in valid:
-        k = str(it.get("url") or it.get("title") or "")
-        if k and k in seen:
-            continue
-        if k:
-            seen.add(k)
-        exact.append(it)
-    kept, sigs = [], []
-    for it in exact:
-        dom, toks = _domain(it.get("url")), _title_tokens(it.get("title"))
-        dup = False
-        if dom and toks:
-            for sd, st in sigs:
-                if sd == dom and _jaccard(toks, st) >= threshold:
-                    dup = True
+    valid = [(idx, it) for idx, it in enumerate(items or []) if isinstance(it, dict)]
+    seen, kept, sigs, merged = {}, [], [], []
+    for idx, it in valid:
+        url = it.get("url")
+        url = url if isinstance(url, str) and url.strip() else None
+        kept_idx, reason = seen.get(url), "exact_url"
+        dom, toks = _domain(url), _title_tokens(it.get("title"))
+        if kept_idx is None and merge_similar and dom and toks:
+            for prior_idx, prior_dom, prior_toks in sigs:
+                if prior_dom == dom and _jaccard(toks, prior_toks) >= threshold:
+                    kept_idx, reason = prior_idx, "similar_title"
                     break
-        if not dup:
-            sigs.append((dom, toks))
+        if kept_idx is None:
+            kept_idx = idx
+            sigs.append((idx, dom, toks))
             kept.append(it)
-    return {"kept": kept, "before": len(valid), "after": len(kept)}
+        else:
+            merged.append({"kept_index": kept_idx, "dropped_index": idx, "reason": reason})
+        if url is not None:
+            seen[url] = kept_idx
+    return {"kept": kept, "before": len(valid), "after": len(kept), "merged": merged}

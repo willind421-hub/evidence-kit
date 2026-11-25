@@ -159,5 +159,6 @@ def test_brief_lines_overdue_and_empty():
 
 def test_missing_pyyaml_gives_clear_error(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "yaml", None)   # makes "import yaml" raise ImportError
-    with pytest.raises(ImportError, match=r"evidence-kit\[yaml\]"):
+    with pytest.raises(ImportError, match=r"pip install pyyaml") as exc:
         reference_ledger.load_instances(tmp_path / "any.yaml")
+    assert 'pip install "evidence-kit[yaml]"' not in str(exc.value)

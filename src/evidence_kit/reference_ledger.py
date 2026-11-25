@@ -16,11 +16,12 @@ Registration policy (hybrid):
 The YAML file is owned by the user; this code is only a read-only loader and
 checker with no side effects.
 
-Requires PyYAML for :func:`load_instances` (``pip install "evidence-kit[yaml]"``).
+Requires PyYAML for :func:`load_instances` (``pip install pyyaml``).
 :func:`brief_lines` works on already-loaded rows and needs no extra dependency.
 """
 from __future__ import annotations
 
+from datetime import date, datetime
 from pathlib import Path
 from typing import List
 
@@ -35,7 +36,7 @@ def _require_yaml():
     except ImportError as exc:
         raise ImportError(
             "evidence_kit.reference_ledger.load_instances needs PyYAML. "
-            'Install it with: pip install "evidence-kit[yaml]"  (or: pip install pyyaml)'
+            'Install it with: pip install pyyaml (or, from this checkout: pip install -e ".[yaml]")'
         ) from exc
     return yaml
 
@@ -53,7 +54,9 @@ def load_instances(path) -> List[dict]:
     yaml = _require_yaml()
     try:
         data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
+    except (OSError, UnicodeError, ValueError, yaml.YAMLError):
+        return []
+    if not isinstance(data, dict):
         return []
     rows = data.get("instances")
     if not isinstance(rows, dict):
@@ -86,6 +89,8 @@ def load_instances(path) -> List[dict]:
         notes = row.get("notes")
         notes = notes.strip() if isinstance(notes, str) and notes.strip() else None
         due = row.get("due")
+        if isinstance(due, date) and not isinstance(due, datetime):
+            due = due.isoformat()
         due = due.strip() if isinstance(due, str) and due.strip() else None
         instances.append({
             "id": str(inst_id), "type": itype, "label": label.strip(),
